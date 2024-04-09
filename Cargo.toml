@@ -1,6 +1,7 @@
 [package]
 name = "robinhood"
 version = "0.1.1-alpha.2"
+edition = "2021"
 description = "Rust Wrapper for Robinhood Trade"
 readme = "README.md"
 authors = ["Sanko Robinson <sanko@cpan.org>"]
