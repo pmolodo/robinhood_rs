@@ -41,8 +41,8 @@ extern crate failure;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use reqwest::header::{Authorization, Bearer, ContentType, Headers, UserAgent};
-use reqwest::{Client as HTTPClient, Response};
+use reqwest::blocking::{Client as HTTPClient, Response};
+use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE, USER_AGENT};
 
 use std::collections::HashMap;
 
@@ -51,7 +51,7 @@ use std::io::Read;
 use chrono::naive::NaiveDate;
 use chrono::prelude::*;
 
-use failure::{Error, err_msg};
+use failure::Error;
 
 #[macro_use]
 pub mod macros;
@@ -150,7 +150,7 @@ impl Client {
     }
 
     pub fn _get_res(&self, url: &str) -> Response {
-        let mut req = self.client.get(url);
+        let req = self.client.get(url);
         req.send().unwrap()
     }
 
@@ -165,9 +165,11 @@ impl Client {
     pub fn _post_res(&self, url: &str, params: Option<HashMap<&str, &str>>) -> Response {
         let mut req = self.client.post(url);
 
-        if params.is_some() {
-            req.form(&params.to_owned());
-        }
+        req = if let Some(params) = params {
+            req.form(&params.to_owned())
+        } else {
+            req
+        };
 
         req.send().unwrap()
     }
@@ -187,7 +189,7 @@ impl Client {
     ) -> Response {
         self.client
             .patch(url)
-            .header(ContentType::json())
+            .header(CONTENT_TYPE, HeaderValue::from_static("application/json"))
             .body(serde_json::to_string(&patch).unwrap())
             .send()
             .unwrap()
@@ -370,7 +372,7 @@ pub struct ClientBuilder {
     client_string: Option<String>, // OAuth2
     scope: Option<String>,         /* OAuth2: read, watchlist, investments, trade, balances,
                                     * funding:all:read */
-    mfa_callback: Rc<RefCell<FnMut(String) -> String>>,
+    mfa_callback: Rc<RefCell<dyn FnMut(String) -> String>>,
 }
 
 impl ClientBuilder {
@@ -427,7 +429,7 @@ impl ClientBuilder {
 
         let mut res = client
             .post("https://api.robinhood.com/oauth2/token/")
-            .header(UserAgent::new(self.agent.to_owned()))
+            .header(USER_AGENT, self.agent.to_owned())
             .form(&params.to_owned())
             .send()
             .unwrap()
@@ -457,7 +459,7 @@ impl ClientBuilder {
 
         let res = client
             .post("https://api.robinhood.com/api-token-auth/")
-            .header(UserAgent::new(self.agent.to_owned()))
+            .header(USER_AGENT, self.agent.to_owned())
             .form(&params.to_owned())
             .send()
             .unwrap()
@@ -473,8 +475,8 @@ impl ClientBuilder {
     }
 
     pub fn build(&mut self) -> Result<Client, Error> {
-        let mut headers = Headers::new();
-        headers.set(UserAgent::new(self.agent.to_owned()));
+        let mut headers = HeaderMap::new();
+        headers.insert(USER_AGENT, HeaderValue::from_str(&self.agent)?);
         let mut authorized = false;
 
         if self.username.is_some() && self.username.is_some() {
@@ -482,20 +484,22 @@ impl ClientBuilder {
                 // let mfa_callback = self.mfa_callback.as_ref();
                 let token = self._oauth_login(None);
                 // println!("OAuth2: {:?}", token);
-                if token.is_some() {
-                    headers.set(Authorization(Bearer {
-                        token: token.unwrap().access_token.to_owned().unwrap(),
-                    }));
-                    authorized = true;
+                if let Some(token) = token {
+                    if let Some(access_token) = token.access_token {
+                        let header_str = format!("Bearer {}", access_token);
+                        headers.insert(AUTHORIZATION, HeaderValue::from_str(&header_str)?);
+                        authorized = true;
+                    }
                 }
             } else {
                 // Old skool
                 let token = self._classic_login(None);
                 // println!("Classic: {:?}", token);
-                if token.is_some() {
-                    headers.set(Authorization(
-                        String::from("Token ") + token.unwrap().token.to_owned().unwrap().as_ref(),
-                    ));
+                if let Some(token) = token {
+                    if let Some(token) = token.token {
+                        let header_str = format!("Token {}", token);
+                        headers.insert(AUTHORIZATION, HeaderValue::from_str(&header_str)?);
+                    }
                     authorized = true;
                 }
             }
@@ -568,7 +572,8 @@ impl Instruments {
                 format!(
                     "https://api.robinhood.com/instruments/?symbol={}",
                     symbol.into()
-                ).to_owned(),
+                )
+                .to_owned(),
             ),
         };
 
@@ -789,16 +794,16 @@ impl OrderBuilder {
         params.insert("quantity", self.quantity.to_string());
         params.insert("side", self.side.to_owned());
 
-        if self.stop_price.is_some() {
-            params.insert("stop_price", self.stop_price.unwrap().to_string());
+        if let Some(stop_price) = self.stop_price {
+            params.insert("stop_price", stop_price.to_string());
             params.insert("trigger", "stop".to_owned());
         }
         if self._type == "market" && self.price.is_none() {
             // self.price =
             // TODO: Get price from quote endpoint
         }
-        if self.price.is_some() {
-            params.insert("price", self.price.unwrap().to_string());
+        if let Some(price) = self.price {
+            params.insert("price", price.to_string());
         }
 
         params.insert("override_day_trade_checks", "true".to_string());
@@ -807,8 +812,10 @@ impl OrderBuilder {
             // params.insert("extended_hours", "true".to_string());
         }
 
-        let mut req = self.client.post("https://api.robinhood.com/orders/");
-        req.form(&params.to_owned());
+        let req = self
+            .client
+            .post("https://api.robinhood.com/orders/")
+            .form(&params.to_owned());
         let res = req.send().unwrap().json::<OrderData>().unwrap();
         Order { data: res }
     }
@@ -892,7 +899,7 @@ impl OrderBuilder {
     //
     // let mut res = client
     // .post("https://api.robinhood.com/oauth2/token/")
-    // .header(UserAgent::new(self.agent.to_owned()))
+    // .header(USER_AGENT, self.agent.to_owned())
     // .form(&params.to_owned())
     // .send()
     // .unwrap()
@@ -924,7 +931,7 @@ impl OrderBuilder {
     //
     // let res = client
     // .post("https://api.robinhood.com/api-token-auth/")
-    // .header(UserAgent::new(self.agent.to_owned()))
+    // .header(USER_AGENT, self.agent.to_owned())
     // .form(&params.to_owned())
     // .send()
     // .unwrap()
@@ -940,8 +947,8 @@ impl OrderBuilder {
     // }
     //
     // pub fn build(&mut self) -> Result<Client> {
-    // let mut headers = Headers::new();
-    // headers.set(UserAgent::new(self.agent.to_owned()));
+    // let mut headers = HeaderMap::new();
+    // headers.insert(USER_AGENT, self.agent.to_owned());
     // let mut authorized = false;
     //
     // if self.username.is_some() && self.username.is_some() {
@@ -951,8 +958,8 @@ impl OrderBuilder {
     // let mfa_callback = self.mfa_callback.as_ref();
     // let token = self._oauth_login(None);
     // if token.is_some() {
-    // headers.set(Authorization(Bearer {
-    // token: token.unwrap().access_token.to_owned().unwrap(),
+    //     headers.insert(AUTHORIZATION, String::from("Bearer ")
+    //         + token.unwrap().access_token.to_owned().unwrap().as_ref(),
     // }));
     // }
     // }
@@ -960,8 +967,8 @@ impl OrderBuilder {
     // Old skool
     // let token = self._classic_login(None);
     // println!("{:?}", token);
-    // headers.set(Authorization(
-    // String::from("Token ") + token.unwrap().token.to_owned().unwrap().as_ref(),
+    // headers.insert(AUTHORIZATION,
+    //     String::from("Token ") + token.unwrap().token.to_owned().unwrap().as_ref(),
     // ));
     // }
     //
